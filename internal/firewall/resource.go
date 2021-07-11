@@ -37,6 +37,23 @@ func Resource() *schema.Resource {
 				Type:     schema.TypeMap,
 				Optional: true,
 			},
+			"apply_to": {
+				Type:     schema.TypeSet,
+				Optional: true,
+				ForceNew: true,
+				Elem: &schema.Resource{
+					Schema: map[string]*schema.Schema{
+						"server": {
+							Type:     schema.TypeInt,
+							Optional: true,
+						},
+						"label_selector": {
+							Type:     schema.TypeString,
+							Optional: true,
+						},
+					},
+				},
+			},
 			"rule": {
 				Type:     schema.TypeSet,
 				Optional: true,
@@ -114,6 +131,15 @@ func resourceFirewallCreate(ctx context.Context, d *schema.ResourceData, m inter
 			opts.Rules = append(opts.Rules, rule)
 		}
 	}
+	if applyTos, ok := d.GetOk("apply_to"); ok {
+		for _, tfRawApplyTo := range applyTos.(*schema.Set).List() {
+			if err := validateApplyTo(tfRawApplyTo); err != nil {
+				return err
+			}
+			applyTo := toHcloudApplyTo(tfRawApplyTo)
+			opts.ApplyTo = append(opts.ApplyTo, applyTo)
+		}
+	}
 	if labels, ok := d.GetOk("labels"); ok {
 		tmpLabels := make(map[string]string)
 		for k, v := range labels.(map[string]interface{}) {
@@ -135,6 +161,42 @@ func resourceFirewallCreate(ctx context.Context, d *schema.ResourceData, m inter
 	d.SetId(strconv.Itoa(res.Firewall.ID))
 
 	return resourceFirewallRead(ctx, d, m)
+}
+
+func validateApplyTo(tfRawApplyTo interface{}) diag.Diagnostics {
+	tfApplyTo := tfRawApplyTo.(map[string]interface{})
+	if _, ok := tfApplyTo["server"]; ok {
+		if _, ok2 := tfApplyTo["label_selector"]; ok2 {
+			return diag.Errorf("It is not allowed to combine 'server' and 'label_selector' in one 'apply_to'. Create 'apply_to' for each 'server' and 'label_selector'.")
+		}
+	}
+	return nil
+}
+
+func toHcloudApplyTo(tfRawApplyTo interface{}) hcloud.FirewallResource {
+	tfApplyTo := tfRawApplyTo.(map[string]interface{})
+	applyTo := hcloud.FirewallResource{}
+	if server, ok := tfApplyTo["server"]; ok {
+		applyTo.Type = hcloud.FirewallResourceTypeServer
+		applyTo.Server = &hcloud.FirewallResourceServer{ID: server.(int)}
+	}
+	if labelSelector, ok := tfApplyTo["label_selector"]; ok {
+		applyTo.Type = hcloud.FirewallResourceTypeLabelSelector
+		applyTo.LabelSelector = &hcloud.FirewallResourceLabelSelector{Selector: labelSelector.(string)}
+	}
+	return applyTo
+}
+
+func toTFApplyTo(hcloudApplyTo hcloud.FirewallResource) map[string]interface{} {
+	tfApplyTo := make(map[string]interface{})
+
+	if hcloudApplyTo.Type == hcloud.FirewallResourceTypeServer {
+		tfApplyTo["server"] = []int{hcloudApplyTo.Server.ID}
+	} else {
+		tfApplyTo["label_selector"] = []string{hcloudApplyTo.LabelSelector.Selector}
+	}
+
+	return tfApplyTo
 }
 
 func toHcloudRule(tfRawRule interface{}) hcloud.FirewallRule {
@@ -334,8 +396,13 @@ func setFirewallSchema(d *schema.ResourceData, v *hcloud.Firewall) {
 	for i, rule := range v.Rules {
 		rules[i] = toTFRule(rule)
 	}
+	applyTo := make([]map[string]interface{}, len(v.AppliedTo))
+	for i, appliedTo := range v.AppliedTo {
+		applyTo[i] = toTFApplyTo(appliedTo)
+	}
 	d.Set("rule", rules)
 	d.Set("labels", v.Labels)
+	d.Set("apply_to", applyTo)
 }
 
 func waitForFirewallActions(ctx context.Context, client *hcloud.Client, actions []*hcloud.Action, firewall *hcloud.Firewall) error {
